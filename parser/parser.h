@@ -88,7 +88,8 @@ typedef struct {
   const char* start;
   uint32_t length;
   uint32_t lineNo;
-} Token
+  Value value;
+} Token;
 
 struct parser {
   const char* file;
@@ -97,6 +98,7 @@ struct parser {
   char curChar;
   Token curToken;
   Token preToken;
+  ObjModule* curModule;
 
   int interpolationExpectRightParenNum;
   struct parser* parent;
