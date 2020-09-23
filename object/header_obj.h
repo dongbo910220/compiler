@@ -16,28 +16,28 @@ typedef enum {
 } ObjType;  //对象类型
 
 typedef struct objHeader {
-  ObjType type;
-  bool  isDark;
-  Class* class;
-  struct objHeader* next;
-} ObjHeader;
+   ObjType type;
+   bool isDark;	   //对象是否可达
+   Class* class;   //对象所属的类
+   struct objHeader* next;   //用于链接所有已分配对象
+} ObjHeader;	  //对象头,用于记录元信息和垃圾回收
 
-type enum {
-  VT_UNDEFINED,
-  VT_NULL,
-  VT_FALSE,
-  VT_TRUE,
-  VT_NUM,
-  VT_OBJ,
-} ValueType;
+typedef enum {
+   VT_UNDEFINED,
+   VT_NULL,
+   VT_FALSE,
+   VT_TRUE,
+   VT_NUM,
+   VT_OBJ   //值为对象,指向对象头
+} ValueType;     //value类型
 
 typedef struct {
-  ValueType type;
-  union {
-    double num;
-    ObjHeader* objHeader;
-  };
-} Value;
+   ValueType type;
+   union {
+      double num;
+      ObjHeader* objHeader;
+   };
+} Value;   //通用的值结构
 
 DECLARE_BUFFER_TYPE(Value)
 
