@@ -1458,6 +1458,100 @@ static void unaryOperator(CompileUnit* cu, bool canAssign UNUSED) {
    emitCall(cu, 0, rule->id, 1);
 }
 
+//编译变量定义
+static void compileVarDefinition(CompileUnit* cu, bool isStatic) {
+    consumeCurToken(cu->curParser, TOKEN_ID, "missing variable name!");
+    Token name = cu->curParser->preToken;
+    //只支持定义单个变量
+    if (cu->curParser->curToken.type == TOKEN_COMMA) {
+       COMPILE_ERROR(cu->curParser, "'var' only support declaring a variable.");
+    }
+
+    //一 先判断是否是类中的域定义   确保cu是模块cu
+    if (cu->enclosingUnit == NULL && cu->enclosingClassBK != NULL) {
+      if (isStatic) {   //静态域
+        char* staticFieldId = ALLOCATE_ARRAY(cu->curParser->vm, char, MAX_ID_LEN);
+        memset(staticFieldId, 0, MAX_ID_LEN);
+        uint32_t staticFieldId;
+        char* clsName = cu->enclosingClassBK->name->value.start;
+        uint32_t clsLen =  cu->enclosingClassBK->name->value.length;
+
+        //用前缀“‘cls ’ + 类名 + 变量名” 做为静态域在模块编译单元中的局部变量
+        memmove(staticFieldId, "cls", 3);
+        memmove(staticFieldId + 3, clsName, clsLen);
+        memmove(staticFieldId + 3 + clsLen, " ", 1);
+        const char* tkName = name.start;
+        uint32_t tkLen = name.length;
+        memmove(staticFieldId + 4 + clsLen, tkName, tkLen);
+        staticFieldIdLen = strlen(staticFieldId);
+
+        if (findLocal(cu, staticFieldId, staticFieldIdLen) == -1) {
+          int index = declareLocalVar(cu, staticFieldId, staticFieldIdLen);
+          writeOpCode(cu, OPCODE_PUSH_NULL);
+          ASSERT(cu->scopeDepth == 0, "should in class scope!");
+          defineVariable(cu, index);
+
+          //静态域可初始化
+          Variable var = findVariable(cu, staticFieldId, staticFieldIdLen);
+          if (matchToken(cu->curParser, TOKEN_ASSIGN)) {
+            expression(cu, BP_LOWEST);
+            emitStoreVariable(cu, var);
+          }
+        } else {
+          COMPILE_ERROR(cu->curParser,
+        "static field '%s' redefinition!", strchr(staticFieldId, ' ') + 1);
+        }
+
+      } else {    //定义实例域
+        ClassBookKeep* classBK = getEnclosingClassBK(cu);
+
+        int fieldIndex = getIndexFromSymbolTable(
+          &classBK->fields, name.start, name.length);
+        if (fieldIndex == -1) {
+          fieldIndex = addSymbol(cu->curParser->vm,
+          &classBK->fields, name.start, name.length);
+
+        } else {
+          if (fieldIndex > MAX_FIELD_NUM) {
+            COMPILE_ERROR(cu->curParser,
+           "the max number of instance field is %d!", MAX_FIELD_NUM);
+         } else {
+           char id[MAX_ID_LEN] = {'\0'};
+  	       memcpy(id, name.start, name.length);
+  	       COMPILE_ERROR(cu->curParser,
+  		     "instance field '%s' redefinition!", id);
+         }
+        }
+        if (matchToken(cu->curParser, TOKEN_ASSIGN)) {
+          COMPILE_ERROR(cu->curParser,
+ 		     "instance field isn`t allowed initialization!");
+        }
+        return;
+      }
+
+      //二 若不是类中的域定义,就按照一般的变量定义
+      if (matchToken(cu->curParser, TOKEN_ASSIGN)) {
+        //若在定义时赋值就解析表达式,结果会留到栈顶
+        expression(cu, BP_LOWEST);
+      } else {
+        //否则就初始化为NULL,即在栈顶压入NULL,
+        //也是为了与上面显式初始化保持相同栈结构
+        writeOpCode(cu, OPCODE_PUSH_NULL);
+      }
+
+      uint32_t index = declareVariable(cu, name.start, name.length);
+      defineVariable(cu, index);
+
+
+
+
+
+}
+
+
+
+
+
 //编译程序
 static void compileProgram(CompileUnit* cu) {
    ;
