@@ -409,6 +409,49 @@ static int declareModuleVar(VM* vm, ObjModule* objModule,
         return addSymbol(vm, &objModule->moduleVarName, name, length);
 }
 
+//丢掉作用域scopeDepth之内的局部变量
+static uint32_t discardLocalVar(CompileUnit* cu, int scopeDepth) {
+    ASSERT(cu->scopeDepth > -1, "upmost scope can`t exit!");
+    int localIdx = cu->localVarNum - 1;
+
+    //变量作用域大于scodeDepth的为其内嵌作用域中的变量,
+    //跳出scodeDepth时内层也没用了,要回收其局部变量.
+    while (localIdx >= 0 && cu->localVars[localIdx].scopeDepth >= scopeDepth) {
+      if (cu->localVars[localIdx].isUpvalue) {
+        //如果此局量是其内层的upvalue就将其关闭
+        writeByte(cu, OPCODE_CLOSE_UPVALUE);
+      } else {
+        //否则就弹出该变量回收空间
+        writeByte(cu, OPCODE_POP);
+      }
+      localIdx--;
+    }
+
+    //返回丢掉的局部变量个数
+    return cu->localVarNum - 1 - localIdx;
+}
+
+//进入新作用域
+static void enterScope(CompileUnit* cu) {
+    //进入内嵌作用域
+    cu->scopeDepth++;
+}
+
+//退出作用域
+static void leaveScope(CompileUnit* cu) {
+  //对于非模块编译单元,丢弃局部变量
+  if (cu->enclosingUnit != NULL) {
+      //出作用域后丢弃本作用域以内的局部变量
+      uint32_t discardNum = discardLocalVar(cu, cu->scopeDepth);
+      cu->localVarNum -= discardNum;
+      cu->stackSlotNum -= discardNum;
+  }
+
+  //回到上一层作用域
+  cu->scopeDepth--;
+}
+
+
 //返回包含cu->enclosingClassBK的最近的CompileUnit
 static CompileUnit* getEnclosingClassBK(CompileUnit* cu) {
     while(cu != NULL) {
@@ -1542,15 +1585,359 @@ static void compileVarDefinition(CompileUnit* cu, bool isStatic) {
       uint32_t index = declareVariable(cu, name.start, name.length);
       defineVariable(cu, index);
 
+}
 
+//编译if语句
+static void compileIfStatment(CompileUnit* cu) {
+  consumeCurToken(cu->curParser, TOKEN_LEFT_PAREN, "missing '(' after if!");
+  expression(cu, BP_LOWEST);  //生成计算if条件表达式的指令步骤
+  consumeCurToken(cu->curParser,
+  TOKEN_RIGHT_PAREN, "missing ')' before '{' in if!");
 
+  //若条件为假，if跳转到false分支的起始地址,现为该地址设置占位符
+  uint32_t falseBranchStart =
+      emitInstrWithPlaceholder(cu, OPCODE_JUMP_IF_FALSE);
 
+  //编译then分支
+  //代码块前后的'{'和'}'由compileStatment负责读取
+  compileStatment(cu);
 
+  //如果有else分支
+  if (matchToken(cu->curParser, TOKEN_ELSE)) {\
+    //添加跳过else分支的跳转指令
+    uint32_t falseBrachEnd = emitInstrWithPlaceholder(cu, OPCODE_JUMP);
+
+    //进入else分支编译之前,先回填falseBranchStart
+    patchPlaceholder(cu, falseBranchStart);
+
+    //编译else分支
+    compileStatment(cu);
+
+    //此时知道了false块的结束地址,回填falseBranchEnd
+    patchPlaceholder(cu, falseBranchEnd);
+
+  } else {    //若不包括else块
+     //此时falseBranchStart就是件为假时,需要跳过整个true分支的目标地址
+     patchPlaceholder(cu, falseBranchStart);
+  }
+}
+
+//编译语句(即程序中与声明,定义无关的、表示"动作"的代码)
+static void compileStatment(CompileUnit* cu) {
+  if (matchToken(cu->curParser, TOKEN_IF)) {
+     compileIfStatment(cu);
+  } else if (matchToken(cu->curParser, TOKEN_WHILE)) {
+     compileWhileStatment(cu);
+  } else if (matchToken(cu->curParser, TOKEN_FOR)) {
+     compileForStatment(cu);
+  } else if (matchToken(cu->curParser, TOKEN_RETURN)) {
+     compileReturn(cu);
+  } else if (matchToken(cu->curParser, TOKEN_BREAK)) {
+     compileBreak(cu);
+  } else if (matchToken(cu->curParser, TOKEN_CONTINUE)) {
+     compileContinue(cu);
+  }
+}
+
+//开始循环,进入循环体的相关设置等
+static void enterLoopSetting(CompileUnit* cu, Loop* loop) {
+    //cu->fn->instrStream.count是下一条指令的地址,所以-1
+    loop->condStartIndex = cu->fn->instrStream.count - 1;
+
+    loop->scopeDepth = cu->scopeDepth;
+
+    //在当前循环层中嵌套新的循环层,当前层成为内嵌层的外层.
+    loop->enclosingLoop = cu->curLoop;
+
+    //使cu->curLoop指向新的内层
+    cu->curLoop = loop;
+}
+
+//编译循环体
+static void compileLoopBody(CompileUnit* cu) {
+    //使循环体起始地址指向下一条指令地址
+    cu->curLoop->bodyStartIndex = cu->fn->instrStream.count;
+
+    compileStatment(cu); //编译循环体
+}
+
+//获得ip所指向的操作码的操作数占用的字节数
+uint32_t getBytesOfOperands(Byte* instrStream,
+			   Value* constants, int ip) {
+           switch((OpCode)instrStream[ip]) {
+             case OPCODE_CONSTRUCT:
+             case OPCODE_RETURN:
+             case OPCODE_END:
+             case OPCODE_CLOSE_UPVALUE:
+             case OPCODE_PUSH_NULL:
+             case OPCODE_PUSH_FALSE:
+             case OPCODE_PUSH_TRUE:
+             case OPCODE_POP:
+       	 return 0;
+
+         case OPCODE_CREATE_CLASS:
+         case OPCODE_LOAD_THIS_FIELD:
+         case OPCODE_STORE_THIS_FIELD:
+         case OPCODE_LOAD_FIELD:
+         case OPCODE_STORE_FIELD:
+         case OPCODE_LOAD_LOCAL_VAR:
+         case OPCODE_STORE_LOCAL_VAR:
+         case OPCODE_LOAD_UPVALUE:
+         case OPCODE_STORE_UPVALUE:
+   	 return 1;
+
+         case OPCODE_CALL0:
+         case OPCODE_CALL1:
+         case OPCODE_CALL2:
+         case OPCODE_CALL3:
+         case OPCODE_CALL4:
+         case OPCODE_CALL5:
+         case OPCODE_CALL6:
+         case OPCODE_CALL7:
+         case OPCODE_CALL8:
+         case OPCODE_CALL9:
+         case OPCODE_CALL10:
+         case OPCODE_CALL11:
+         case OPCODE_CALL12:
+         case OPCODE_CALL13:
+         case OPCODE_CALL14:
+         case OPCODE_CALL15:
+         case OPCODE_CALL16:
+         case OPCODE_LOAD_CONSTANT:
+         case OPCODE_LOAD_MODULE_VAR:
+         case OPCODE_STORE_MODULE_VAR:
+         case OPCODE_LOOP:
+         case OPCODE_JUMP:
+         case OPCODE_JUMP_IF_FALSE:
+         case OPCODE_AND:
+         case OPCODE_OR:
+         case OPCODE_INSTANCE_METHOD:
+         case OPCODE_STATIC_METHOD:
+         return 2;
+
+         case OPCODE_SUPER0:
+         case OPCODE_SUPER1:
+         case OPCODE_SUPER2:
+         case OPCODE_SUPER3:
+         case OPCODE_SUPER4:
+         case OPCODE_SUPER5:
+         case OPCODE_SUPER6:
+         case OPCODE_SUPER7:
+         case OPCODE_SUPER8:
+         case OPCODE_SUPER9:
+         case OPCODE_SUPER10:
+         case OPCODE_SUPER11:
+         case OPCODE_SUPER12:
+         case OPCODE_SUPER13:
+         case OPCODE_SUPER14:
+         case OPCODE_SUPER15:
+         case OPCODE_SUPER16:
+         //OPCODE_SUPERx的操作数是分别由writeOpCodeShortOperand
+         //和writeShortOperand写入的,共1个操作码和4个字节的操作数
+   	 return 4;
+
+     case OPCODE_CREATE_CLOSURE:{
+       //获得操作码OPCODE_CLOSURE 操作数,2字节.
+    	 //该操作数是待创建闭包的函数在常量表中的索引
+       uint32_t fnIdx = (instrStream[ip + 1] << 8 | instrStream[ip + 2]);
+
+       //左边第1个2是指fnIdx在指令流中占用的空间
+    	 //每个upvalue有一对儿参数
+       return 2 + (VALUE_TO_OBJFN(constants[fnIdx]))->upvalueNum * 2;
+     }
+
+     default:
+     NOT_REACHED();
+  }
+}
+
+//离开循环体时的相关设置
+static void leaveLoopPatch(CompileUnit* cu) {
+    //获取往回跳转的偏移量,偏移量都为正数
+    int loopBackOffset = cu->fn->instrStream.count - cu->curLoop->condStartIndex + 2;
+
+    //生成向回跳转的CODE_LOOP指令,即使ip -= loopBackOffset
+    writeOpCodeShortOperand(cu, OPCODE_LOOP, loopBackOffset);
+
+    //回填循环体的结束地址
+    patchPlaceholder(cu, cu->curLoop->exitIndex);
+
+    //下面在循环体中回填break的占位符OPCODE_END
+    //循环体开始地址
+    uint32_t idx = cu->curLoop->bodyStartIndex;
+    //循环体结束地址
+    uint32_t loopEndindex = cu->fn->instrStream;
+    while (idx < loopEndindex) {
+      //回填循环体内所有可能的break语句
+      if (OPCODE_END == cu->fn->instrStream.datas[idx]) {
+        cu->fn->instrStream.datas[idx] = OPCODE_JUMP;
+        //回填OPCODE_JUMP的操作数,即跳转偏移量
+
+        //id+1是操作数的高字节,patchPlaceholder中会处理idx + 1和idx + 2
+        patchPlaceholder(cu, idx + 1);
+
+        //使idx指向指令流中下一操作码
+        idx += 3;
+      } else {
+        //为提高遍历速度,遇到不是OPCODE_END的指令,
+     	 //一次跳过该指令及其操作数
+       idx += 1 + getBytesOfOperands(cu->fn->instrStream.datas,
+          cu->fn->constants.datas, idx);
+      }
+    }
+
+    //退出当前循环体, 即恢复cu->curLoop为当前循环层的外层循环
+    cu->curLoop = cu->curLoop->enclosingLoop;
+}
+
+//编译while循环,如 while (a < b) {循环体}
+static void compileWhileStatment(CompileUnit* cu) {
+    Loop loop;
+
+    //设置循环体起始地址等等
+    enterLoopSetting(cu, &loop);
+    consumeCurToken(cu->curParser,
+ 	 TOKEN_LEFT_PAREN, "expect '(' befor conditino!");
+   //生成计算条件表达式的指令步骤,结果在栈顶
+   expression(cu, BP_LOWEST);
+   consumeCurToken(cu->curParser,
+   TOKEN_RIGHT_PAREN, "expect ')' after condition!");
+
+   //先把条件失败时跳转的目标地址占位
+   loop.exitIndex = emitInstrWithPlaceholder(cu, OPCODE_JUMP_IF_FALSE);
+   compileLoopBody(cu);
+
+   //设置循环体结束等等
+   leaveLoopPatch(cu);
+}
+
+//编译for循环,如 for i (sequence) {循环体}
+static void compileForStatment(CompileUnit* cu) {
+  //其中sequence是可迭代的序列
+
+  //for循环会按照while循环的逻辑编译
+  //   for i (sequence) {
+  //      System.print(i)
+  //   }
+  //
+  //在内部会变成:
+  //   var seq = sequence
+  //   var iter
+  //   while iter = seq.iterate(iter) {
+  //      var i = seq.iteratorValue(iter)
+  //      System.print(i)
+  //   }
+
+  //为局部变量seq和iter创建作用域
+  enterScope(cu);
+
+  //读取循环变量的名字,如"for i (sequence)"中"i"
+  consumeCurToken(cu->curParser,
+    TOKEN_ID, "expect variable after for!");
+  const char* loopVarName = cu->curParser->preToken.start;
+  uint32_t loopVarLen = cu->curParser->preToken.length;
+
+  consumeCurToken(cu->curParser,
+  TOKEN_LEFT_PAREN, "expect '(' befor sequence!");
+
+  //编译迭代序列
+  expression(cu, BP_LOWEST);
+  consumeCurToken(cu->curParser, TOKEN_RIGHT_PAREN, "expect ')' after sequence!");
+  //申请一局部变量"seq "来存储序列对象,
+  //其值就是上面expression存储到栈中的结果
+  uint32_t seqSlot = addLocalVar(cu, "seq ", 4);
+
+  writeOpCode(cu, OPCODE_PUSH_NULL);
+  //分配及初始化"iter ",其值就是上面加载到栈中的的NULL
+  uint32_t iterSlot = addLocalVar(cu, "iter ", 5);
+
+  Loop loop;
+  enterLoopSetting(cu, &loop);
+
+  //为调用"seq.iterate(iter)"做准备
+  //1 先压入序列对象"seq ", 即"seq.iterate(iter)"中的seq
+  writeOpCodeByteOperand(cu, OPCODE_LOAD_LOCAL_VAR, seqSlot);
+  //2 再压入参数iter,即"seq.iterate(iter)"中的iter
+  writeOpCodeByteOperand(cu, OPCODE_LOAD_LOCAL_VAR, iterSlot);
+  //3 调用"seq.iterate(iter)"
+  emitCall(cu, 1, "iterate(_)", 10);
+
+  //"seq.iterate(iter)"把结果(下一个迭代器)存储到
+  //args[0](即栈顶),现在将其同步到变量iter
+  writeByteOperand(cu, OPCODE_STORE_LOCAL_VAR, iterSlot);
+
+  //如果条件失败则跳出循环体,目前不知道循环体的结束地址,
+  //先写入占位符.
+  loop.exitIndex = emitInstrWithPlaceholder(cu, OPCODE_JUMP_IF_FALSE);
+
+  //调用"seq.iteratorValue(iter)"以获取值
+  //1 为调用"seq.iteratorValue(iter)"压入参数seq
+  writeOpCodeByteOperand(cu, OPCODE_LOAD_LOCAL_VAR, seqSlot);
+  //2 为调用"seq.iteratorValue(iter)"压入参数iter
+  writeOpCodeByteOperand(cu, OPCODE_LOAD_LOCAL_VAR, iterSlot);
+  //3 调用"seq.iteratorValue(iter)"
+  emitCall(cu, 1, "iteratorValue(_)", 16);
+
+  //为循环变量i创建作用域
+  enterScope(cu);
+  //"seq.iteratorValue(iter)"已经把结果存储到栈顶,
+  //添加循环变量为局部变量,其值在栈顶
+  addLocalVar(cu, loopVarName, loopVarLen);
+
+  //编译循环体
+  compileLoopBody(cu);
+
+  leaveScope(cu); //离开循环变量i的作用域
+
+  leaveLoopPatch(cu);
+
+  leaveScope(cu); //离开变量"seq "和"iter "的作用域
 }
 
 
 
 
+//编译return
+inline static void compileReturn(CompileUnit* cu) {
+    if (PEEK_TOKEN(cu->curParser) == TOKEN_RIGHT_BRACE) {   //空返回值
+      //空return,NULL做为返回值
+      writeOpCode(cu, OPCODE_PUSH_NULL);
+
+    } else { //有返回值
+      expression(cu, BP_LOWEST);
+    }
+    writeOpCode(cu, OPCODE_RETURN); //将上面栈顶的值返回
+}
+
+//编译break
+inline static void compileBreak(CompileUnit* cu) {
+    if (cu->curLoop == NULL) {
+      COMPILE_ERROR(cu->curParser, "break should be used inside a loop!");
+    }
+
+    //在退出循环体之前要丢掉循环体内的局部变量
+    discardLocalVar(cu, cu->curLoop->scopeDepth + 1);
+
+    //由于用OPCODE_END表示break占位, 此时无须记录占位符的返回地址
+    emitInstrWithPlaceholder(cu, OPCODE_END);
+}
+
+//编译continue
+inline static void compileContinue(CompileUnit* cu) {
+  if (cu->curLoop == NULL) {
+     COMPILE_ERROR(cu->curParser, "continue should be used inside a loop!");
+  }
+
+  //回收本作用域中局部变量在栈中的空间, +1是指循环体(包括循环条件)的作用域
+  //不能在cu->localVars数组中去掉,
+  //否则在continue语句后面若引用了前面的变量则提示找不到
+  discardLocalVar(cu, cu->curLoop->scopeDepth + 1);
+
+  int loopBackOffset = cu->fn->instrStream.count - cu->curLoop->condStartIndex + 2;
+
+  //生成向回跳转的CODE_LOOP指令 即使ip -= loopBackOffset
+  writeOpCodeShortOperand(cu, OPCODE_LOOP, loopBackOffset);
+}
 
 //编译程序
 static void compileProgram(CompileUnit* cu) {
