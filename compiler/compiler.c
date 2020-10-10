@@ -1154,6 +1154,15 @@ static void emitLoadModuleVar(CompileUnit* cu, const char* name) {
     writeOpCodeShortOperand(cu, OPCODE_LOAD_MODULE_VAR, index);
 }
 
+//生成存储模块变量的指令
+static void emitStoreModuleVar(CompileUnit* cu, int index) {
+    //把栈顶数据存储到moduleVarValue[index]
+    writeOpCodeShortOperand(cu, OPCODE_STORE_MODULE_VAR, index);
+
+}
+
+
+
 //编译圆括号
 static void parentheses(CompileUnit* cu, bool canAssign UNUSED) {
     //本函数是'('.nud()  假设curToken是'('
@@ -1636,7 +1645,246 @@ static void compileStatment(CompileUnit* cu) {
      compileBreak(cu);
   } else if (matchToken(cu->curParser, TOKEN_CONTINUE)) {
      compileContinue(cu);
+  } else if (matchToken(cu->curParser, TOKEN_LEFT_BRACE)) {
+    //代码块有单独的作用域
+    enterScope(cu);
+    compileBlock(cu);
+    leaveScope(cu);
+  } else {
+    //若不是以上的语法结构则是单一表达式
+    expression(cu, BP_LOWEST);
+
+    //表达式的结果不重要,弹出栈顶结果
+    writeOpCode(cu, OPCODE_POP);
   }
+}
+
+//声明方法
+static int declareMethod(CompileUnit* cu, char* signStr, uint32_t length) {
+    //确保方法被录入到vm->allMethodNames
+    int index = ensureSymbolExist(cu->curParser->vm,
+      &cu->curParser->vm->allMethodNames, signStr, length);
+
+    //下面判断方法是否已定义 即排除重定义
+    IntBuffer* methods = cu->enclosingClassBK->inStatic ?
+      &cu->enclosingClassBK->staticMethods :
+      &cu->enclosingClassBK->instantMethods;
+
+    uint32_t idx = 0;
+    while (idx < methods->count) {
+      if (methoods->datas[idx] == index) {
+        COMPILE_ERROR(cu->curParser, "repeat define method %s in class %s!",
+     	    signStr, cu->enclosingClassBK->name->value.start);
+      }
+    }
+    idx++;
+
+    //若是新定义就加入,这里并不是注册新方法,
+    //而是用索引来记录已经定义过的方法,用于以后排重
+    IntBufferAdd(cu->curParser->vm, methods, index);
+    return index;
+}
+
+//将方法methodIndex指代的方法塞入classVar指代的class.methods中
+static void defineMethod(CompileUnit* cu,
+      Variable classVar, bool isStatic, int methodIndex) {
+//1 待绑定的方法在调用本函数之前已经放到栈顶了
+
+//2 将方法所属的类加载到栈顶
+    emitLoadVariable(cu, classVar);
+
+//3 生成OPCODE_STATIC_METHOD或OPCODE_INSTANCE_METHOD
+    //在运行时绑定
+    OpCode opCode = isStatic ?
+      OPCODE_STATIC_METHOD : OPCODE_INSTANCE_METHOD;
+      writeOpCodeShortOperand(cu, opCode, methodIndex);
+}
+
+//分两步创建实例,constructorIndex是构造函数的索引
+static void emitCreateInstance(CompileUnit* cu,
+      Signature* sign, uint32_t constructorIndex) {
+        CompileUnit methodCU;
+        initCompileUnit(cu->curParser, &methodCU, cu, true);
+
+//1 生成OPCODE_CONSTRUCT指令,该指令生成新实例存储到stack[0].
+    writeOpCode(&methodCU, OPCODE_CONSTRUCT);
+
+//2 生成OPCODE_CALLx指令,该指令调用新实例的构造函数.
+    writeOpCodeShortOperand(&methodCU,
+      (OpCode)(OPCODE_CALL0 + sign->argNum), constructorIndex);
+
+//生成return指令,将栈顶中的实例返回
+    writeOpCode(&methodCU, OPCODE_RETURN);
+
+#if DEBUG
+    endCompileUnit(&methodCU, "", 0);
+#else
+    endCompileUnit(&methodCU);
+#endif
+}
+
+//编译方法定义,isStatic表示是否在编译静态方法
+static void compileMethod(CompileUnit* cu, Variable classVar, bool isStatic) {
+     //inStatic表示是否为静态方法的编译单元
+     cu->enclosingClassBK->inStatic = isStatic;
+     methodSignatureFn methodSign =
+          Rules[cu->curParser->curToken.type].methodSign;
+     if (methodSign == NULL) {
+       COMPILE_ERROR(cu->curParser, "method need signature fucntion!");
+     }
+
+     Signature sign;
+     // curToken是方法名
+     sign.name = cu->curParser->curToken.start;
+     sign.length = cu->curParser->curToken.length;
+     sign.argNum = 0;
+
+     cu->enclosingClassBK->signature = &sign;
+     getNextToken(cu->curParser);
+
+     //为了将函数或方法自己的指令流和局部变量单独存储,
+     //每个函数或方法都有自己的CompileUnit.
+     CompileUnit methodCU;
+     //编译一个方法啦,因此形参isMethod为true
+     initCompileUnit(cu->curParser, &methodCU, cu, true);
+
+     //构造签名
+     methodSign(&methodCU, &sign);
+     consumeCurToken(cu->curParser, TOKEN_LEFT_BRACE,
+  	 "expect '{' at the beginning of method body.");
+
+     if (cu->enclosingClassBK->inStatic && sign.type == SIGN_CONSTRUCT) {
+       COMPILE_ERROR(cu->curParser, "constuctor is not allowed to be static!");
+     }
+
+     char signatureString[MAX_SIGN_LEN] = {'\0'};
+     uint32_t signLen = sign2String(&sign, signatureString);
+
+     //将方法声明
+     uint32_t methodIndex = declareMethod(cu, signatureString, signLen);
+
+     //编译方法体指令流到方法自己的编译单元methodCU
+     compileBody(&methodCU, sign.type == SIGN_CONSTRUCT);
+
+ #if DEBUG
+    //结束编译并创建方法闭包
+    endCompileUnit(&methodCU, signatureString, signLen);
+ #else
+    //结束编译并创建方法闭包
+    endCompileUnit(&methodCU);
+ #endif
+
+    //定义方法:将上面创建的方法闭包绑定到类
+    defineMethod(cu, classVar, cu->enclosingClassBK->inStatic, methodIndex);
+
+    if (sign.type == SIGN_CONSTRUCT) {
+      sign.type = SIGN_METHOD;
+      char signatureString[MAX_SIGN_LEN] = {'\0'};
+      uint32_t signLen = sign2String(&sign, signatureString);
+
+      uint32_t constructorIndex = ensureSymbolExist(cu->curParser->vm,
+          &cu->curParser->vm->allMethodNames, signatureString, signLen);
+
+      emitCreateInstance(cu, &sign, methodIndex);
+
+      //构造函数是静态方法,即类方法
+      defineMethod(cu, classVar, true, constructorIndex);
+    }
+}
+
+//编译类体
+static void compileClassBody(CompileUnit* cu, Variable classVar) {
+
+    if (matchToken(cu->curParser, TPKEN_STATIC)) {
+      if (matchToken(cu->curParser, TOKEN_VAR)) {  //处理静态域 "static var id"
+        compileVarDefinition(cu, true);
+      } else {  //处理静态方法,"static methodName"
+        compileMethod(cu, classVar, true);
+      }
+
+      } else if (matchToken(cu->curParser, TOKEN_VAR)) {   //实例域
+         compileVarDefinition(cu, false);
+      } else {  //类的方法
+         compileMethod(cu, classVar, false);
+      }
+}
+
+//编译类定义
+static void compileClassDefinition(CompileUnit* cu) {
+    Variable classVar;
+    if (cu->scopeDepth != -1) {
+      COMPILE_ERROR(cu->curParser,
+	    "class definition must be in the module scope!");
+    }
+
+    classVar.scopeType = VAR_SCOPE_MODULE;
+    consumeCurToken(cu->curParser, TOKEN_ID,
+ 	 "keyword class should follow by class name!");  //读入类名
+    classVar.index = declareVariable(cu,
+    cu->curParser->preToken.start, cu->curParser->preToken.length);
+
+    //生成类名,用于创建类
+    ObjString* className = newObjString(cu->curParser->vm,
+ 	 cu->curParser->preToken.start, cu->curParser->preToken.length);
+
+   //生成加载类名指令
+   emitLoadConstant(cu, OBJ_TO_VALUE(className));
+   if (matchToken(cu->curParser, TOKEN_LESS)) {  //类继承
+      expression(cu, BP_CALL);
+   } else {  //默认加载object类为基类
+     emitLoadModuleVar(cu, "object");
+   }
+
+   //创建类需要知道域的个数,目前类未定义完,因此域的个数未知,
+   //因此先临时写为255,待类编译完成后再回填属性数
+   int fieldNumIndex = writeOpCodeByteOperand(cu, OPCODE_CREATE_CLASS, 255);
+
+   //虚拟机执行完OPCODE_CREATE_CLASS后,栈顶留下了创建好的类,
+   //因此现在可以用该类为之前声明的类名className赋值
+   if (cu->scopeDepth == -1) {
+     emitStoreModuleVar(cu, classVar.index);
+   }
+
+   ClassBookKeep classBK;
+   classBK.name = className;
+   classBK.inStatic = false;   //默认为false
+   StringBufferInit(&classBK.fields);
+   IntBufferInit(&classBK.instantMethods);
+   IntBufferInit(&classBK.staticMethods);
+
+   //此时cu是模块的编译单元,跟踪当前编译的类
+   cu->enclosingClassBK = &classBK;
+
+   //读入类名后的'{'
+   consumeCurToken(cu->curParser, TOKEN_LEFT_BRACE,
+	 "expect '{' after class name in the class declaration!");
+
+   //进入类体
+    enterScope(cu);
+
+    //直到类定义结束'}'为止
+    while (!matchToken(cu->curParser, TOKEN_RIGHT_BRACE)) {
+       compileClassBody(cu, classVar);
+       if (PEEK_TOKEN(cu->curParser) == TOKEN_EOF) {
+ 	 COMPILE_ERROR(cu->curParser, "expect '}' at the end of class declaration!");
+       }
+    }
+
+
+    //上面临时写了255个字段,现在类编译完成,回填正确的字段数.
+    //classBK.fields的是由compileVarDefinition函数统计的
+    cu->fn->instrStream.datas[fieldNumIndex] = classBK.fields.count;
+
+    symbolTableClear(cu->curParser->vm, &classBK.fields);
+    IntBufferClear(cu->curParser->vm, &classBK.instantMethods);
+    IntBufferClear(cu->curParser->vm, &classBK.staticMethods);
+
+    //enclosingClassBK用来表示是否在编译类,
+    //编译完类后要置空,编译下一个类时再重新赋值
+    cu->enclosingClassBK = NULL;
+
+    //出作用域,丢弃相关局部变量
+    leaveScope(cu);
 }
 
 //开始循环,进入循环体的相关设置等
