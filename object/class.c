@@ -13,12 +13,12 @@ bool valueIsEqual(Value a, Value b) {
    if (a.type != b.type) {
       return false;
    }
-   
+
    //同为数字,比较数值
    if (a.type == VT_NUM) {
       return a.num == b.num;
    }
-   
+
    //同为对象,若所指的对象是同一个则返回true
    if (a.objHeader == b.objHeader) {
       return true;
@@ -50,7 +50,7 @@ bool valueIsEqual(Value a, Value b) {
 
 //新建一个裸类
 Class* newRawClass(VM* vm, const char* name, uint32_t fieldNum) {
-   Class* class = ALLOCATE(vm, Class); 
+   Class* class = ALLOCATE(vm, Class);
 
    //裸类没有元类
    initObjHeader(vm, &class->objHeader, OT_CLASS, NULL);
@@ -60,6 +60,34 @@ Class* newRawClass(VM* vm, const char* name, uint32_t fieldNum) {
    MethodBufferInit(&class->methods);
 
    return class;
+}
+
+//创建一个类
+Class* newClass(VM* vm, ObjString* className, uint32_t fieldNum, Class* superClass) {
+    #define MAX_METACLASS_LEN MAX_ID_LEN + 10
+    char newClassName[MAX_METACLASS_LEN] = {'\0'};
+    #undef MAX_METACLASS_LEN
+
+    memcpy(newClassName, className->value.start, className->value.length);
+    memcpy(newClassName + className->value.length, " metaclass", 10);
+
+    //先创建子类的meta类
+    Class* metaclass = newRawClass(vm, newClassName, 0);
+    metaclass->objHeader.class = vm->classOfClass;
+
+    //绑定classOfClass为meta类的基类
+    //所有类的meta类的基类都是classOfClass
+    bindSuperClass(vm, metaclass, vm->classOfClass);
+
+    //最后再创建类
+    memcpy(newClassName, className->value.start, className->value.length);
+    newClassName[className->value.length] = '\0';
+    Class* class = newRawClass(vm, newClassName, fieldNum);
+
+    class->objHeader.class = metaclass;
+    bindSuperClass(vm, class, superClass);
+
+    return class;
 }
 
 //数字等Value也被视为对象,因此参数为Value.获得对象obj所属的类
@@ -75,7 +103,7 @@ inline Class* getClassOfObj(VM* vm, Value object) {
       case VT_OBJ:
 	 return VALUE_TO_OBJ(object)->class;
       default:
-	NOT_REACHED(); 
+	NOT_REACHED();
    }
    return NULL;
 }
