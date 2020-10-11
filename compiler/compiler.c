@@ -1887,6 +1887,155 @@ static void compileClassDefinition(CompileUnit* cu) {
     leaveScope(cu);
 }
 
+//编译函数定义
+static void compileFunctionDefinition(ConpileUnit* cu) {
+  // 本语言完全面向对象,
+  // (一)
+  //    函数定义的形式是:
+  //       var function = Fn.new {|形参|
+  //          函数体代码
+  //       }
+  //    Fn.new返回的是{}内函数的闭包
+
+  //    函数调用的形式是"函数闭包.call(...)"
+
+  //    但是传统上
+  // (二)
+  //    函数定义的形式是:
+  //       function 函数名(形参) {
+  //          函数体代码
+  //       }
+  //    函数调用形式是:
+  //       函数名(实参)
+
+   //fun关键字只用在模块作用域中
+   if (cu->enclosingUnit != NULL) {
+      COMPILE_ERROR(cu->curParser, "'fun' should be in module scope!");
+   }
+
+   consumeCurToken(cu->curParser, TOKEN_ID, "missing function name!");
+
+   //函数名加上"Fn "前缀做为模块变量存储
+   char fnName[MAX_SIGN_LEN + 4] = {'\0'};   //"fn xxx\0"
+   memmove(fnName, "Fn ", 3);  //把函数名加上"Fn "前缀后做为变量名
+   memmove(fnName + 3, cu->curParser->preToken.start,
+	 cu->curParser->preToken.length);
+
+   uint32_t fnNameIndex = declareVariable(cu, fnName, strlen(fnName));
+
+   //生成fnCU,专用于存储函数指令流
+   CompileUnit fnCU;
+   initCompileUnit(cu->curParser, &fnCU, cu, false);
+
+   Signature tmpFnSign = {SIGN_METHOD, "", 0, 0};  //临时用于编译函数
+   consumeCurToken(cu->curParser,
+    TOKEN_LEFT_PAREN, "expect '(' after function name!");
+
+    //若有形参则将形参声明局部变量
+    if (!matchToken(cu->curParser, TOKEN_RIGHT_PAREN)) {
+        processParaList(&fnCU, &tmpFnSign);   //将形参声明为函数的局部变量
+        consumeCurToken(cu->curParser,
+  	    TOKEN_RIGHT_PAREN, "expect ')' after parameter list!");
+    }
+
+    fnCU.fn->argNum = tmpFnSign.argNum;
+
+    consumeCurToken(cu->curParser,
+ 	 TOKEN_LEFT_BRACE, "expect '{' at the beginning of method body.");
+
+   //编译函数体,将指令流写进该函数自己的指令单元fnCu
+   compileBody(&fnCU, false);
+
+ #if DEBUG
+    endCompileUnit(&fnCU, fnName, strlen(fnName));
+ #else
+    endCompileUnit(&fnCU);
+ #endif
+
+  //将栈顶的闭包写入变量
+  defineVariable(cu, fnNameIndex);
+}
+
+
+//编译import导入
+static void compileImport(CompileUnit* cu) {
+  //   import "foo"
+  //将按照以下形式处理:
+  //  System.importModule("foo")
+
+  //   import foo for bar1, bar2
+  //将按照以下形式处理:
+  //  var bar1 = System.getModuleVariable("foo", "bar1")
+  //  var bar2 = System.getModuleVariable("foo", "bar2")
+
+  consumeCurToken(cu->curParser, TOKEN_ID, "expect module name after export!");
+
+  //备份模块名token
+  Token moduleNameToken = cu->curParser->preToken;
+
+  //导入时模块的扩展名不需要,有可能用户会把模块的扩展名加上,
+  //比如import sparrow.sp, 这时候就要跳过扩展名
+  if (cu->curParser->preToken.start[cu->curParser->preToken.length] == '.') {
+      printf("\nwarning!!! the imported module needn`t extension!, compiler try to ignor it!\n");
+
+      //跳过扩展名
+      getNextToken(cu->curParser); //跳过'.'
+      getNextToken(cu->curParser); //跳过"sp"
+
+  }
+
+  //把模块名转为字符串，存储为常量
+  ObjString* moduleName = newObjString(cu->curParser->vm,
+ moduleNameToken.start, moduleNameToken.length);
+ uint32_t constModIdx = addConstant(cu, OBJ_TO_VALUE(moduleName));
+
+  //1 为调用system.importModule("foo")压入参数system
+  emitLoadModuleVar(cu, "System");
+  //2 为调用system.importModule("foo")压入参数foo
+  writeOpCodeShortOperand(cu, OPCODE_LOAD_CONSTANT, constModIdx);
+  //3 现在可以调用system.importModule("foo")
+  emitCall(cu, 1, "importModule(_)", 15);
+
+  //回收返回值args[0]所在空间
+  writeOpCode(cu, OPCODE_POP);
+
+  //如果后面没有关键字for就导入结束
+  if (!matchToken(cu->curParser, TOKEN_FOR)) {
+     return;
+  }
+
+  //循环编译导入的模块变量(以逗号分隔),
+  //如:import foo for bar1, bar2中的bar1, bar2
+  do {
+    consumeCurToken(cu->curParser, TOKEN_ID,
+    "expect variable name after 'for' in import!");
+
+    //在本模块中声明导入的模块变量
+    uint32_t varIdx = declareVariable(cu,
+    cu->curParser->preToken.start, cu->curParser->preToken.length);
+
+    //把模块变量转为字符串,存储为常量
+    ObjString* constVarName = newObjString(cu->curParser->vm,
+    cu->curParser->preToken.start, cu->curParser->preToken.length);
+    uint32_t constVarIdx = addConstant(cu, OBJ_TO_VALUE(constVarName));
+
+    // 1 为调用System.getModuleVariable("foo", "bar1") 压入system
+    emitLoadModuleVar(cu, "System");
+    // 2 为调用System.getModuleVariable("foo", "bar1") 压入foo
+    writeOpCodeShortOperand(cu, OPCODE_LOAD_CONSTANT, constModIdx);
+    // 3 为调用System.getModuleVariable("foo", "bar1") 压入bar1
+    writeOpCodeShortOperand(cu, OPCODE_LOAD_CONSTANT, constVarIdx);
+    // 4 调用System.getModuleVariable("foo", "bar1")
+    emitCall(cu, 2, "getModuleVariable(_,_)", 22);
+
+    //此时栈顶是system.getModuleVariable("foo", "bar1")的返回值,
+    //即导入的模块变量的值 下面将其同步到相应变量中
+    defineVariable(cu, varIdx);
+  } while (matchToken(cu->curParser, TOKEN_COMMA));
+}
+
+
+
 //开始循环,进入循环体的相关设置等
 static void enterLoopSetting(CompileUnit* cu, Loop* loop) {
     //cu->fn->instrStream.count是下一条指令的地址,所以-1
