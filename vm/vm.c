@@ -271,3 +271,238 @@ static void bindMethodAndPatch(VM* vm, OpCode opCode,
         //修正过后，绑定method到class
         bindMethod(vm, class, methodIndex, method);
 }
+
+//执行指令
+VMResult executeInstruction(VM* vm, register ObjThread* curThread) {
+    vm->curThread = curThread;
+    register Frame* curFrame;
+    register Value* stackStart;
+    register uint8_t* ip;
+    register ObjFn*  fn;
+    Opcode opCode;
+
+    //定义操作运行时栈的宏
+    //esp是栈中下一个可写入数据的slot
+    #define PUSH(value) (*curThread->esp++ = value)  //压栈
+    #define POP()        (*(--curThread->esp))   //出栈
+    #define DROP()       (curThread->esp--)
+    #define PEEK()        (*(curThread->esp - 1)) // 获得栈顶的数据
+    #define PEEK2()       (*(curThread->esp - 2))  // 获得次栈顶的数据
+
+    //下面是读取指令流:objfn.instrStream.datas
+    #define READ_BYTE()   (*ip++)   //从指令流中读取一字节
+    //读取指令流中的2字节
+    #define READ_SHORT()  (ip += 2, (uint16_t)((ip[-2] << 8) | ip[-1]))
+
+    //当前指令单元执行的进度就是在指令流中的指针,即ip,将其保存起来
+    #define STORE_CUR_FRAME() curFrame->ip = ip   // 备份ip以能回到当前
+
+    //加载最新的frame
+    #define LOAD_CUR_FRAME()      \
+        /* frames是数组,索引从0起,故usedFrameNum-1 */   \
+        curFrame = &curThread->frames[curThread->usedFrameNum - 1];   \
+        stackStart = curFrame->stackStart;  \
+        ip = curFrame->ip;  \
+        fn = curFrame->closure->fn;
+
+    #define DECODE loopStart; \
+        opCode = READ_BYTE();   \
+        switch (opCode)
+
+    #define CASE(shortOpCode) case OPCODE_##shortOpCode
+    #define LOOP() goto loopStart
+
+    LOAD_CUR_FRAME();
+    DECODE {
+      //若OPCODE依赖于指令环境(栈和指令流),会在各OPCODE下说明
+
+      CASE(LOAD_LOCAL_VAR):
+      //指令流: 1字节的局部变量索引
+
+      PUSH(stackStart[READ_BYTE()]);
+      LOOP();
+
+      CASE(LOAD_THIS_FIELD): {
+        //指令流: 1字节的field索引
+
+        uint8_t fieldIdx = READ_BYTE();
+
+        //stackStart[0]是实例对象this
+        ASSERT(VALUE_IS_OBJINSTANCE(stackStart[0]), "method receiver should be objInstance.");
+        ObjInstance* objInstance = VALUE_TO_OBJINSTANCE(stackStart[0]);
+
+        ASSERT(fieldIdx < objInstance->objHeader.class->fieldNum, "out of bounds field!");
+        PUSH(objInstance->fields[fieldIdx]);
+        LOOP();
+
+      }
+
+        CASE(POP):
+        DPOP();
+        LOOP();
+
+        CASE(PUSH_NULL):
+        PUSH(VT_TO_VALUE(VT_NULL));
+        LOOP();
+
+       CASE(PUSH_FALSE):
+       	 PUSH(VT_TO_VALUE(VT_FALSE));
+       	 LOOP();
+
+        CASE(PUSH_TRUE):
+         PUSH(VT_TO_VALUE(VT_TRUE));
+         LOOP();
+
+         CASE(STORE_LOCAL_VAR):
+         //栈顶: 局部变量值
+      	 //指令流: 1字节的局部变量索引
+
+         stackStart[READ_BYTE()] = PEEK();
+         LOOP();
+
+         CASE(LOAD_CONSTANT):
+         //指令流: 2字节的常量索引
+
+        //加载常量就是把常量表中的数据入栈
+        PUSH(fn->constants.datas[READ_SHORT()]);
+        LOOP();
+
+        {
+          int argNum, index;
+          Value* args;
+          Class* class;
+          Method* method;
+
+            CASE(CALL0):
+            CASE(CALL1):
+            CASE(CALL2):
+            CASE(CALL3):
+            CASE(CALL4):
+            CASE(CALL5):
+            CASE(CALL6):
+            CASE(CALL7):
+            CASE(CALL8):
+            CASE(CALL9):
+            CASE(CALL10):
+            CASE(CALL11):
+            CASE(CALL12):
+            CASE(CALL13):
+            CASE(CALL14):
+            CASE(CALL15):
+            CASE(CALL16):
+            //指令流1: 2字节的method索引
+         	 //因为还有个隐式的receiver(就是下面的args[0]), 所以参数个数+1.
+           argNum = opCode - OPCODE_CALL0 + 1;
+
+           //读取2字节的数据(CALL指令的操作数),index是方法名的索引
+           index = READ_SHORT();
+
+           //为参数指针数组args赋值
+           args = curThread->esp - argNum;
+
+           //获得方法所在的类
+           class = getClassOfObj(vm, args[0]);
+           goto invokeMethod;
+
+               CASE(SUPER0):
+               CASE(SUPER1):
+               CASE(SUPER2):
+               CASE(SUPER3):
+               CASE(SUPER4):
+               CASE(SUPER5):
+               CASE(SUPER6):
+               CASE(SUPER7):
+               CASE(SUPER8):
+               CASE(SUPER9):
+               CASE(SUPER10):
+               CASE(SUPER11):
+               CASE(SUPER12):
+               CASE(SUPER13):
+               CASE(SUPER14):
+               CASE(SUPER15):
+               CASE(SUPER16):
+            //指令流1: 2字节的method索引
+            //指令流2: 2字节的基类常量索引
+
+            //因为还有个隐式的receiver(就是下面的args[0]), 所以参数个数+1.
+            argNum = opCode - OPCODE_SUPER0 + 1;
+            index = READ_SHORT();
+            args = curThread->esp - argNum;
+
+            //在函数bindMethodAndPatch中实现的基类的绑定
+            class = VALUE_TO_CLASS(fn->constants.datas[READ_SHORT()]);
+
+              invokeMethod:
+            if ((uint32_t)index > class->methods.count ||
+            (method = &class->methods.datas[index])->type == MT_NONE) {
+              RUN_ERROR("method \"%s\" not found!", vm->allMethodNames.datas[index].str);
+            }
+
+  switch (method->type) {
+      case MT_PRIMITIVE:
+
+        //如果返回值为true,则vm进行空间回收的工作
+        if (method->primFn(vm, args)) {
+          //args[0]是返回值, argNum-1是保留args[0],
+    		  //args[0]的空间最终由返回值的接收者即函数的主调方回收
+          curThread->esp -= argNum - 1;
+        } else {
+          //如果返回false则说明有两种情况:
+    		  //   1 出错(比如原生函数primThreadAbort使线程报错或无错退出),
+    		  //   2 或者切换了线程,此时vm->curThread已经被切换为新的线程
+    		  //保存线程的上下文环境,运行新线程之后还能回到当前老线程指令流的正确位置
+          STORE_CUR_FRAME();
+
+          if (!VALUE_IS_NULL(curThread->errorObj)) {
+            if (VALUE_IS_OBJSTR(curThread->errorObj)) {
+              ObjString* err = VALUE_TO_OBJSTR(curThread->errorObj);
+              printf("%s", err->value.start);
+            }
+            //出错后将返回值置为null,避免主调方获取到错误的结果
+            PEEK() = VT_TO_VALUE(VT_NULL);
+          }
+
+          //如果没有待执行的线程,说明执行完毕
+    		  if (vm->curThread == NULL) {
+    		     return VM_RESULT_SUCCESS;
+    		  }
+
+          //vm->curThread已经由返回false的函数置为下一个线程
+          //切换到下一个线程的上下文
+          curThread = vm->curThread;
+          LOAD_CUR_FRAME();
+        }
+        break;
+
+        case MT_SCRIPT:
+            STORE_CUR_FRAME();
+            createFrame(vm, curThread, (ObjClosure*)method->obj, argNum);
+            LOAD_CUR_FRAME();
+            break;
+
+        case MT_FN_CALL:
+            ASSERT(VALUE_IS_OBJCLOSURE(args[0]), "instance must be a closure!");
+            ObjFn* objFn = VALUE_TO_OBJCLOSURE(args[0])->fn;
+            //-1是去掉实例this
+            if (argNum - 1 < objFn->argNum) {
+   		  RUN_ERROR("arguments less");
+   	       }
+
+           STORE_CUR_FRAME();
+           createFrame(vm, curThread, VALUE_TO_OBJCLOSURE(args[0]), argNum);
+           LOAD_CUR_FRAME();  //加载最新的frame
+           break;
+
+           default:
+              NOT_REACHED();
+            }
+
+            LOOP();
+        }
+
+
+    }
+
+
+
+}
