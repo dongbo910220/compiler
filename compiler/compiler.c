@@ -2338,7 +2338,17 @@ inline static void compileContinue(CompileUnit* cu) {
 
 //编译程序
 static void compileProgram(CompileUnit* cu) {
-   ;
+  if (matchToken(cu->curParser, TOKEN_CLASS)) {
+     compileClassDefinition(cu);
+  } else if (matchToken(cu->curParser, TOKEN_FUN)) {
+     compileFunctionDefinition(cu);
+  } else if (matchToken(cu->curParser, TOKEN_VAR)) {
+     compileVarDefinition(cu, cu->curParser->preToken.type == TOKEN_STATIC);
+  } else if (matchToken(cu->curParser, TOKEN_IMPORT)) {
+     compileImport(cu);
+  } else {
+     compileStatment(cu);
+  }
 }
 
 //编译模块
@@ -2370,7 +2380,33 @@ ObjFn* compileModule(VM* vm, ObjModule* objModule, const char* moduleCode) {
       compileProgram(&moduleCU);
    }
 
+   //模块编译完成,生成return null返回,避免执行下面endCompileUnit中添加的OPCODE_END
+   writeOpCode(&moduleCU, OPCODE_PUSH_NULL);
+   writeOpCode(&moduleCU, OPCODE_RETURN);
+
+   //检查在函数id中用行号声明的模块变量是否在引用之后有定义
+   uint32_t idx = moduleVarNumBefor;
+   while (idx < objModule->moduleVarValue.count) {
+        //为简单起见,依然是遇到第一个错后就报错退出,后面的不再检查
+        if (VALUE_IS_NUM(objModule->moduleVarValue.datas[idx])) {
+          char* str = objModule->moduleVarName.datas[idx].str;
+         ASSERT(str[objModule->moduleVarName.datas[idx].length] == '\0',
+               "module var name is not closed!");
+               uint32_t lineNo = VALUE_TO_NUM(objModule->moduleVarValue.datas[idx]);
+            	 COMPILE_ERROR(&parser, "line:%d, variable \'%s\' not defined!", lineNo, str);
+        }
+        idx++;
+   }
+
+   //模块编译完成,当前编译单元置空
+   vm->curParser->curCompileUnit = NULL;
+   vm->curParser = vm->curParser->parent;
+#if DEBUG
+  return endCompileUnit(&moduleCU, "(script)", 8);
+#else
+  return endCompileUnit(&moduleCU);
+#endif
    //后面还有很多要做的,临时放一句话在这提醒.
    //不过目前上面是死循环,本句无法执行。
-   printf("There is something to do...\n"); exit(0);
+   //printf("There is something to do...\n"); exit(0);
 }

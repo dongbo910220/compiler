@@ -71,7 +71,7 @@ char* readFile(const char* path) {
       IO_ERROR("Could`t read file \"%s\".\n", path);
    }
    fileContent[fileSize] = '\0';
-   
+
    fclose(file);
    return fileContent;
 }
@@ -99,7 +99,7 @@ static bool primObjectIs(VM* vm, Value* args) {
    if (!VALUE_IS_CLASS(args[1])) {
       RUN_ERROR("argument must be class!");
    }
-   
+
    Class* thisClass = getClassOfObj(vm, args[0]);
    Class* baseClass = (Class*)(args[1].objHeader);
 
@@ -140,7 +140,7 @@ static bool primClassSupertype(VM* vm UNUSED, Value* args) {
    Class* class = VALUE_TO_CLASS(args[0]);
    if (class->superClass != NULL) {
       RET_OBJ(class->superClass);
-   } 
+   }
    RET_VALUE(VT_TO_VALUE(VT_NULL));
 }
 
@@ -161,7 +161,7 @@ static ObjModule* getModule(VM* vm, Value moduleName) {
    if (value.type == VT_UNDEFINED) {
       return NULL;
    }
-   
+
    return VALUE_TO_OBJMODULE(value);
 }
 
@@ -179,7 +179,7 @@ static ObjThread* loadModule(VM* vm, Value moduleName, const char* moduleCode) {
 
       module = newObjModule(vm, modName->value.start);
       mapSet(vm, vm->allModules, moduleName, OBJ_TO_VALUE(module));
-      
+
       //继承核心模块中的变量
       ObjModule* coreModule = getModule(vm, CORE_MODULE);
       uint32_t idx = 0;
@@ -188,7 +188,7 @@ static ObjThread* loadModule(VM* vm, Value moduleName, const char* moduleCode) {
 	       coreModule->moduleVarName.datas[idx].str,
 	       strlen(coreModule->moduleVarName.datas[idx].str),
 	       coreModule->moduleVarValue.datas[idx]);
-	 idx++; 
+	 idx++;
       }
    }
 
@@ -196,13 +196,13 @@ static ObjThread* loadModule(VM* vm, Value moduleName, const char* moduleCode) {
    ObjClosure* objClosure = newObjClosure(vm, fn);
    ObjThread* moduleThread = newObjThread(vm, objClosure);
 
-   return moduleThread;  
+   return moduleThread;
 }
 
 //执行模块,目前为空,桩函数
 VMResult executeModule(VM* vm, Value moduleName, const char* moduleCode) {
    ObjThread* objThread = loadModule(vm, moduleName, moduleCode);
-   return VM_RESULT_ERROR;
+   return executeInstruction(vm, objThread);
 }
 
 //table中查找符号symbol 找到后返回索引,否则返回-1
@@ -254,7 +254,7 @@ static Class* defineClass(VM* vm, ObjModule* objModule, const char* name) {
 void bindMethod(VM* vm, Class* class, uint32_t index, Method method) {
    if (index >= class->methods.count) {
       Method emptyPad = {MT_NONE, {0}};
-      MethodBufferFillWrite(vm, &class->methods, emptyPad, index - class->methods.count + 1); 
+      MethodBufferFillWrite(vm, &class->methods, emptyPad, index - class->methods.count + 1);
    }
    class->methods.datas[index] = method;
 }
@@ -269,7 +269,7 @@ void bindSuperClass(VM* vm, Class* subClass, Class* superClass) {
    //继承基类方法
    uint32_t idx = 0;
    while (idx < superClass->methods.count) {
-      bindMethod(vm, subClass, idx, superClass->methods.datas[idx]); 
+      bindMethod(vm, subClass, idx, superClass->methods.datas[idx]);
       idx++;
    }
 }
@@ -295,7 +295,7 @@ void buildCore(VM* vm) {
    //定义classOfClass类,它是所有meta类的meta类和基类
    vm->classOfClass = defineClass(vm, coreModule, "class");
 
-   //objectClass是任何类的基类 
+   //objectClass是任何类的基类
    bindSuperClass(vm, vm->classOfClass, vm->objectClass);
 
    PRIM_METHOD_BIND(vm->classOfClass, "name", primClassName);
@@ -304,7 +304,7 @@ void buildCore(VM* vm) {
 
    //定义object类的元信息类objectMetaclass,它无须挂载到vm
    Class* objectMetaclass = defineClass(vm, coreModule, "objectMeta");
-   
+
    //classOfClass类是所有meta类的meta类和基类
    bindSuperClass(vm, objectMetaclass, vm->classOfClass);
 
@@ -315,7 +315,7 @@ void buildCore(VM* vm) {
    vm->objectClass->objHeader.class = objectMetaclass;
    objectMetaclass->objHeader.class = vm->classOfClass;
    vm->classOfClass->objHeader.class = vm->classOfClass; //元信息类回路,meta类终点
-   
+
    //执行核心模块
    executeModule(vm, CORE_MODULE, coreModuleCode);
 }
