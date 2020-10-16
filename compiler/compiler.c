@@ -2406,6 +2406,8 @@ ObjFn* compileModule(VM* vm, ObjModule* objModule, const char* moduleCode) {
 #else
   return endCompileUnit(&moduleCU);
 #endif
+
+
    //后面还有很多要做的,临时放一句话在这提醒.
    //不过目前上面是死循环,本句无法执行。
    //printf("There is something to do...\n"); exit(0);
