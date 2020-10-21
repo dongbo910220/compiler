@@ -1,6 +1,23 @@
 #include "vm.h"
 #include <stdlib.h>
 #include "core.h"
+#ifdef DEBUG
+      #include "debug.h"
+#endif
+#include "gc.h"
+
+//把obj做为临时的根对象,就是把obj添加为gc的白名单,避免被gc回收
+void pushTmpRoot(VM* vm, ObjHeader* obj) {
+    ASSERT(obj != NULL, "root obj is null!");
+    ASSERT(vm->tmpRootNum < MAX_TEMP_ROOTS_NUM, "temporary roots too much!");
+    vm->tmpRoots[vm->tmpRootNum++] = obj;
+}
+
+//去掉临时的根对象
+void popTmpRoot(VM* vm) {
+   ASSERT(vm->tmpRootNum < MAX_TEMP_ROOTS_NUM, "temporary roots too much!");
+   vm->tmpRootNum--;
+}
 
 //初始化虚拟机
 void initVM(VM* vm) {
@@ -10,6 +27,20 @@ void initVM(VM* vm) {
    StringBufferInit(&vm->allMethodNames);
    vm->allModules = newObjMap(vm);
    vm->curParser = NULL;
+   vm->config.heapGrowthFactor = 1.5;
+
+   //最小堆大小为1MB
+   vm->config.minHeapSize = 1024 * 1024;
+   //初始堆大小为10MB
+   vm->config.initialHeapSize = 1024 * 1024 * 10;
+
+   vm->config.nextGC = vm->config.initialHeapSize;
+   vm->grays.count = 0;
+   vm->grays.capacity = 32;
+
+   //初始化指针数组grayObjects
+   vm->grays.grayObjects =
+        (ObjHeader**)malloc(vm->grays.capacity * sizeof(ObjHeader*));
 }
 
 VM* newVM() {
@@ -20,6 +51,24 @@ VM* newVM() {
    initVM(vm);
    buildCore(vm);
    return vm;
+}
+
+//释放虚拟机vm
+void freeVM(VM* vm) {
+     ASSERT(vm->allMethodNames.count > 0, "VM have already been freed!");
+
+     //释放所有的对象
+     ObjHeader* objHeader = vm->allObjects;
+     while (objHeader != NULL) {
+        //释放之前先备份下一个结点地址
+        ObjHeader* next = objHeader->next;
+        freeObject(vm, objHeader);
+        objHeader = next;
+     }
+
+     vm->grays.grayObjects = DEALLOCATE(vm, vm->grays.grayObjects);
+     StringBufferClear(vm, &vm->allMethodNames);
+     DEALLOCATE(vm, vm);
 }
 
 //确保stack有效
